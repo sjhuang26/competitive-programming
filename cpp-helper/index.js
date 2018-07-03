@@ -177,7 +177,7 @@ class Instance {
     let data;
     try {
       let input = await this.sourceDirectory.getFile('in').read();
-      data = (await this.runCommand(`cd ${this.tempDirectory.baseName()} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ..\\${this.sourceDirectory.getFile('in').baseName()}`, {
+      data = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ..\\${this.sourceDirectory.getFile('in').baseName()}`, {
         timeout: OUTPUT_TIMEOUT,
         maxBuffer: MAX_OUTPUT_SIZE
       })).stdout;
