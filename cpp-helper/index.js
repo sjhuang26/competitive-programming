@@ -31,6 +31,7 @@ return 0;
 }
 `;
 const INPUT_FILE_TEMPLATE = `pause=false
+stopOnError=true
 inputs:0=
 %%%
 FOOBAR
@@ -139,13 +140,13 @@ class InstanceDirectory extends Directory {
 }
 
 class InterfacedFile extends File {
-  constructor(file, displayMode) {
+  constructor(file, displayMode, onBeforePushState) {
     super(file.path);
     this.state = {};
     this.displayMode = displayMode;
     this.displayMode.log = 'blockRaw';
     this.displayMode.timestamp = 'normal';
-    this.displayMode.rawData = 'inlineRaw';
+    this.onBeforePushState = onBeforePushState || (function() {});
   }
 
   async pullState() {
@@ -157,8 +158,7 @@ class InterfacedFile extends File {
     if (state !== undefined) this.state = state;
     const date = new Date();
     this.state.timestamp = date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds();
-    this.state.rawData = {};
-    this.state.rawData = JSON.stringify(this.state);
+    this.onBeforePushState(this.state);
     await this.write(fileInterface.jsonToFile(this.state, this.displayMode));
     return this;
   }
@@ -183,7 +183,8 @@ class Instance {
     this.tempDirectory = this.sourceDirectory.directory(TEMP_DIRECTORY_NAME).mixin(InstanceDirectory, this.name);
     this.inputFile = this.tempDirectory.getFile('in').mixin(InterfacedFile, {
       inputs: 'blockRaw',
-      pause: 'normal'
+      pause: 'normal',
+      stopOnError: 'normal'
     });
 
     this.buildOperationCount = 0;
@@ -193,8 +194,13 @@ class Instance {
 
     this.outputFile = this.tempDirectory.getFile('out').mixin(InterfacedFile, {
       outputs: 'blockRaw',
-      compileError: 'blockRaw'
-    });
+      compileError: 'blockRaw',
+      buildOperationCount: 'normal'
+    }, this.onBeforePushState.bind(this));
+  }
+
+  onBeforePushState(state) {
+    state.buildOperationCount = this.buildOperationCount;
   }
 
   async init() {
@@ -213,6 +219,14 @@ class Instance {
     this.onInputFileChange();
   }
 
+  async safeLog(message) {
+    try {
+      this.outputFile.log(message);
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
   watch(file, event) {
     chokidar.watch(file.path, {
     }).on('all', event.bind(this));
@@ -227,6 +241,7 @@ class Instance {
     this.log('running');
     await this.outputFile.log('running...');
     let data;
+    let rawData;
     try {
       let inputs = (await this.inputFile.pullState()).state.inputs;
       this.outputFile.state.outputs = [];
@@ -235,27 +250,47 @@ class Instance {
         inputs = [inputs];
       }
       for (let i = 0; i < inputs.length; ++i) {
-        const input = inputs[i];
-        this.log(`running case ${i + 1} of ${inputs.length}`);
-        this.outputFile.log(`running case ${i + 1} of ${inputs.length}...`);
-        await this.tempDirectory.getFile('cpp.in').write(input);
-        data = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`, {
-          timeout: OUTPUT_TIMEOUT,
-          maxBuffer: MAX_OUTPUT_SIZE
-        })).stdout;
-        this.outputFile.state.outputs.push(data);
-        this.outputFile.pushState();
+        try {
+          const input = inputs[i];
+          this.log(`running case ${i + 1} of ${inputs.length}`);
+          this.outputFile.log(`running case ${i + 1} of ${inputs.length}...`);
+          await this.tempDirectory.getFile('cpp.in').write(input);
+          rawData = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`, {
+            timeout: OUTPUT_TIMEOUT,
+            maxBuffer: MAX_OUTPUT_SIZE
+          }));
+        } catch (e) {
+          rawData = e;
+          if (e.code === 3221225477) {
+            // SEGFAULT
+            this.log('run killed (segfault)');
+            this.outputFile.log('run killed (segfault)');
+            if (this.inputFile.state.stopOnError === 'true') {
+              throw 'safe';
+            }
+          } else if (e.process !== undefined && e.process.killed === true) {
+            // OUTPUT OVER LIMITS
+            this.log(`run killed (output over limits, may be truncated)`);
+            this.outputFile.log(`run killed (output over limits, may be truncated)`);
+            if (this.inputFile.state.stopOnError === 'true') {
+              throw 'safe';
+            }
+          } else {
+            throw e;
+          }
+        } finally {
+          this.outputFile.state.outputs.push(rawData.stdout + rawData.stderr);
+          await this.outputFile.pushState();
+        }
       }
     } catch (e) {
-      this.fail(undefined, e);
-      if (e.process !== undefined && e.process.killed === true) {
-        this.log(`run killed (output over limits, may be truncated)`);
-        this.outputFile.log(`run killed (output over limits, may be truncated)`);
-        data = e.stdout;
-      } else {
-        this.log('run failed');
-        this.outputFile.log('run failed');
+      if (e !== 'safe') {
+        this.log('run failed (unknown reason)');
+        await this.outputFile.log('run failed (unknown reason)');
         throw e;
+      } else {
+        this.log('stopped on error (as specified in input)');
+        await this.outputFile.log('stopped on error (as specified in input)');
       }
     }
     this.log('run finished');
@@ -310,9 +345,10 @@ class Instance {
       await this.outputFile.clearLog();
       await callback.call(this);
       this.log('build operation finished');
-      this.outputFile.log('done!');
+      await this.outputFile.log('done!');
     } catch (e) {
       this.fail('build operation failed', e);
+      await this.safeLog('build operation failed');
     } finally {
       this.buildOpen = true;
     }
@@ -327,7 +363,9 @@ class Instance {
   }
 
   fail(message, error) {
-    if (message !== undefined) this.log(message);
+    if (message !== undefined) {
+      this.log(message);
+    }
     this.logDebug('full error:');
     this.logDebug(error);
     this.logDebug('full error (JSON):');
