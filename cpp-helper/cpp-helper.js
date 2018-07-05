@@ -302,12 +302,16 @@ class Instance {
     await this.outputFile.log('compiling...');
     try {
       await this.runCommand(`g++ ${this.sourceFile.path} -o ${this.tempDirectory.getFile('cpp.exe').path} > ${this.tempDirectory.getFile('compiler.out').path} 2>&1`);
+      data = await this.tempDirectory.getFile('compiler.out').read();
+      if (data !== '') throw new Error('compile failed');
+      delete this.outputFile.state.compileError;
       this.log('compile finished');
     } catch (e) {
       this.log('compile failed');
-      data = await this.tempDirectory.getFile('compiler.out').read();
-      if (data !== '') {
-        await this.outputFile.log('compile failed.');
+      if (data == '') {
+        await this.outputFile.log('compile failed (unknown reason).');
+      } else {
+        await this.outputFile.log('compile failed (compile error).');
         this.outputFile.state.compileError = data;
         this.outputFile.pushState();
       }
