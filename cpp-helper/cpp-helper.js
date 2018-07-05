@@ -298,15 +298,19 @@ class Instance {
 
   async compile() {
     this.log('compiling');
+    let rawData;
     let data = '';
     await this.outputFile.log('compiling...');
     try {
-      await this.runCommand(`g++ ${this.sourceFile.path} -o ${this.tempDirectory.getFile('cpp.exe').path} > ${this.tempDirectory.getFile('compiler.out').path} 2>&1`);
-      data = await this.tempDirectory.getFile('compiler.out').read();
-      if (data !== '') throw new Error('compile failed');
+      rawData = await this.runCommand(`g++ ${this.sourceFile.path} -o ${this.tempDirectory.getFile('cpp.exe').path}`);
+      data = rawData.stdout + rawData.stderr;
+      if (data !== '') throw rawData;
       delete this.outputFile.state.compileError;
+      this.outputFile.pushState();
       this.log('compile finished');
     } catch (e) {
+      rawData = e;
+      data = rawData.stdout + rawData.stderr;
       this.log('compile failed');
       if (data == '') {
         await this.outputFile.log('compile failed (unknown reason).');
