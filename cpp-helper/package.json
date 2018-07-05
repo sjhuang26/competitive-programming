@@ -7,6 +7,7 @@
     "chokidar": "^2.0.4",
     "commander": "^2.16.0",
     "mkdirp": "^0.5.1",
+    "pkg": "^4.3.3",
     "promptly": "^3.0.3"
   }
 }
