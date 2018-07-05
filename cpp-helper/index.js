@@ -4,8 +4,11 @@ const util = require('util');
 const chokidar = require('chokidar');
 const path = require('path');
 const mkdirp = require('mkdirp');
-const prm = util.promisify;
 const child_process = require('child_process');
+
+const fileInterface = require('./file-interface');
+
+const prm = util.promisify;
 const prmWriteFile = prm(fs.writeFile);
 const prmReadFile = prm(fs.readFile);
 const exec = prm(child_process.exec);
@@ -27,7 +30,16 @@ cout<<"Hello world! The input is "<<x<<'\\n';
 return 0;
 }
 `;
-const INPUT_FILE_TEMPLATE = `FOOBAR`;
+const INPUT_FILE_TEMPLATE = `pause=false
+inputs:0=
+%%%
+FOOBAR
+%%%
+inputs:1=
+%%%
+FOOBAR2
+%%%
+`;
 
 class FileSystem {
   constructor(path) {
@@ -48,6 +60,10 @@ class FileSystem {
 
   baseName() {
     return path.basename(this.path);
+  }
+
+  mixin(constructorFunction, ...args) {
+    return new constructorFunction(this, ...args);
   }
 }
 
@@ -90,16 +106,6 @@ class File extends FileSystem {
     return this;
   }
 
-  async log(content) {
-    await this.line(`%% ${content} %%`);
-    return this;
-  }
-
-  async logInline(content) {
-    await this.append(`%% ${content} %%`);
-    return this;
-  }
-
   async line(content) {
     await this.append(content + '\n');
     return this;
@@ -132,17 +138,63 @@ class InstanceDirectory extends Directory {
   }
 }
 
+class InterfacedFile extends File {
+  constructor(file, displayMode) {
+    super(file.path);
+    this.state = {};
+    this.displayMode = displayMode;
+    this.displayMode.log = 'blockRaw';
+    this.displayMode.timestamp = 'normal';
+    this.displayMode.rawData = 'inlineRaw';
+  }
+
+  async pullState() {
+    this.state = fileInterface.fileToJSON(await this.read());
+    return this;
+  }
+
+  async pushState(state) {
+    if (state !== undefined) this.state = state;
+    const date = new Date();
+    this.state.timestamp = date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds();
+    this.state.rawData = {};
+    this.state.rawData = JSON.stringify(this.state);
+    await this.write(fileInterface.jsonToFile(this.state, this.displayMode));
+    return this;
+  }
+
+  async log(content) {
+    if (this.state.log === undefined) this.state.log = '';
+    this.state.log += content + '\n';
+    await this.pushState();
+  }
+
+  async clearLog() {
+    this.state.log = '';
+    await this.pushState();
+  }
+}
+
 class Instance {
   constructor(sourceFile) {
     this.name = path.basename(sourceFile).split('.')[0];
     this.sourceFile = new File(sourceFile);
-    this.sourceDirectory = new InstanceDirectory(this.sourceFile.parent(), this.name);
-    this.tempDirectory = new InstanceDirectory(this.sourceDirectory.directory(TEMP_DIRECTORY_NAME), this.name);
-    this.inputFile = this.sourceDirectory.getFile('in');
+    this.sourceDirectory = this.sourceFile.parent().mixin(InstanceDirectory, this.name);
+    this.tempDirectory = this.sourceDirectory.directory(TEMP_DIRECTORY_NAME).mixin(InstanceDirectory, this.name);
+    this.inputFile = this.tempDirectory.getFile('in').mixin(InterfacedFile, {
+      inputs: 'blockRaw',
+      pause: 'normal'
+    });
+
+    this.buildOperationCount = 0;
+
     this.buildOpen = true;
     this.ready = false;
 
-    this.status = this.sourceDirectory.getFile('out');
+    this.outputFile = this.tempDirectory.getFile('out').mixin(InterfacedFile, {
+      outputs: 'blockRaw',
+      compileError: 'blockRaw'
+    });
   }
 
   async init() {
@@ -158,11 +210,11 @@ class Instance {
       this.fail('[FATAL] could not init files', e);
     }
     this.onSourceFileChange();
+    this.onInputFileChange();
   }
 
   watch(file, event) {
     chokidar.watch(file.path, {
-      ignored: /(^|[\/\\])\../
     }).on('all', event.bind(this));
   }
 
@@ -173,39 +225,46 @@ class Instance {
 
   async run() {
     this.log('running');
-    await this.status.log('running...');
+    await this.outputFile.log('running...');
     let data;
     try {
-      let input = await this.sourceDirectory.getFile('in').read();
-      data = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ..\\${this.sourceDirectory.getFile('in').baseName()}`, {
-        timeout: OUTPUT_TIMEOUT,
-        maxBuffer: MAX_OUTPUT_SIZE
-      })).stdout;
+      let inputs = (await this.inputFile.pullState()).state.inputs;
+      this.outputFile.state.outputs = [];
+      this.outputFile.pushState();
+      if (!Array.isArray(inputs)) {
+        inputs = [inputs];
+      }
+      for (let i = 0; i < inputs.length; ++i) {
+        const input = inputs[i];
+        this.log(`running case ${i + 1} of ${inputs.length}`);
+        this.outputFile.log(`running case ${i + 1} of ${inputs.length}...`);
+        await this.tempDirectory.getFile('cpp.in').write(input);
+        data = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`, {
+          timeout: OUTPUT_TIMEOUT,
+          maxBuffer: MAX_OUTPUT_SIZE
+        })).stdout;
+        this.outputFile.state.outputs.push(data);
+        this.outputFile.pushState();
+      }
     } catch (e) {
       this.fail(undefined, e);
       if (e.process !== undefined && e.process.killed === true) {
         this.log(`run killed (output over limits, may be truncated)`);
-        this.status.log(`run killed (output over limits, may be truncated)`);
+        this.outputFile.log(`run killed (output over limits, may be truncated)`);
         data = e.stdout;
       } else {
         this.log('run failed');
-        this.status.log('run failed');
+        this.outputFile.log('run failed');
         throw e;
       }
     }
-    await this.status.log('START');
-    await this.status.append(data);
-    await this.status.log('END');
     this.log('run finished');
   }
 
   async compile() {
-    this.log('cleaning');
-    this.log('cleaning finished');
-
     this.log('compiling');
     let data = '';
-    await this.status.log('compiling...');
+    await this.outputFile.log('compiling...');
     try {
       await this.runCommand(`g++ ${this.sourceFile.path} -o ${this.tempDirectory.getFile('cpp.exe').path} > ${this.tempDirectory.getFile('compiler.out').path} 2>&1`);
       this.log('compile finished');
@@ -213,8 +272,9 @@ class Instance {
       this.log('compile failed');
       data = await this.tempDirectory.getFile('compiler.out').read();
       if (data !== '') {
-        await this.status.log('compile failed:');
-        await this.status.append(data);
+        await this.outputFile.log('compile failed.');
+        this.outputFile.state.compileError = data;
+        this.outputFile.pushState();
       }
       throw e;
     }
@@ -237,9 +297,20 @@ class Instance {
     }
     this.buildOpen = false;
     try {
+      await this.inputFile.pullState();
+      if (this.inputFile.state.pause === 'true') {
+        this.log('build operations paused');
+        await this.outputFile.clearLog();
+        await this.outputFile.log('build operations paused');
+        return;
+      }
+      ++this.buildOperationCount;
+      this.log(`** BUILD OPERATION STARTED (#${this.buildOperationCount}) **`);
       await this.stopOutputProcess();
-      await this.status.clear();
-      callback.call(this);
+      await this.outputFile.clearLog();
+      await callback.call(this);
+      this.log('build operation finished');
+      this.outputFile.log('done!');
     } catch (e) {
       this.fail('build operation failed', e);
     } finally {
@@ -248,7 +319,7 @@ class Instance {
   }
 
   log(...content) {
-    console.log(`[${this.name}@${this.sourceFile.path}]`, ...content);
+    console.log(`[${this.name}]`, ...content);
   }
 
   logDebug(...content) {
