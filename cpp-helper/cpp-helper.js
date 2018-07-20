@@ -30,7 +30,7 @@ cout<<"Hello world! The input is "<<x<<'\\n';
 return 0;
 }
 `;
-const INPUT_FILE_TEMPLATE = `pause=false
+const INPUT_FILE_TEMPLATE = `pause=true
 stopOnError=true
 inputs:0=
 %%%
@@ -184,7 +184,9 @@ class Instance {
     this.inputFile = this.tempDirectory.getFile('in').mixin(InterfacedFile, {
       inputs: 'blockRaw',
       pause: 'normal',
-      stopOnError: 'normal'
+      stopOnError: 'normal',
+      limitLevel: 'normal',
+      inputFilePath: 'normal'
     });
 
     this.buildOperationCount = 0;
@@ -243,11 +245,29 @@ class Instance {
     let data;
     let rawData;
     try {
-      let inputs = (await this.inputFile.pullState()).state.inputs;
+      await this.inputFile.pullState();
+      let inputs = this.inputFile.state.inputs;
+      let inputFilePath = this.inputFile.state.inputFilePath;
       this.outputFile.state.outputs = [];
       this.outputFile.pushState();
-      if (!Array.isArray(inputs)) {
+      if (inputs === undefined) {
+        inputs = [];
+      } else if (!Array.isArray(inputs)) {
         inputs = [inputs];
+      }
+      const limitLevel = this.inputFile.state.limitLevel;
+      if (limitLevel === 'unlimited' || limitLevel === 'direct') {
+        this.log('[WARN] running in reduced limits mode');
+        this.outputFile.log('[WARN] running in reduced limits mode');
+      }
+      if (inputFilePath !== undefined) {
+        this.log('reading from input generator file');
+        this.outputFile.log('reading from input generator file...');
+        inputs.push(await this.tempDirectory.file(inputFilePath).read());
+      }
+      if (inputs.length === 0) {
+        this.log('[WARN] there are no inputs, so nothing will run');
+        this.outputFile.log('[WARN] there are no inputs, so nothing will run');
       }
       for (let i = 0; i < inputs.length; ++i) {
         try {
@@ -255,10 +275,22 @@ class Instance {
           this.log(`running case ${i + 1} of ${inputs.length}`);
           this.outputFile.log(`running case ${i + 1} of ${inputs.length}...`);
           await this.tempDirectory.getFile('cpp.in').write(input);
-          rawData = (await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`, {
-            timeout: OUTPUT_TIMEOUT,
-            maxBuffer: MAX_OUTPUT_SIZE
-          }));
+          if (limitLevel === 'direct') {
+            await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()} > ${this.tempDirectory.getFile(`${i}.raw.out`).baseName()}`);
+            rawData = {
+              stdout: '$$ see raw file $$\n',
+              stderr: ''
+            };
+          } else if (limitLevel === 'reduced') {
+            rawData = await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`);
+            await this.tempDirectory.getFile(`${i}.raw.out`).write(rawData.stdout);
+          } else {
+            rawData = await this.runCommand(`cd ${this.tempDirectory.path} && ${this.tempDirectory.getFile('cpp.exe').baseName()} < ${this.tempDirectory.getFile('cpp.in').baseName()}`, {
+              timeout: OUTPUT_TIMEOUT,
+              maxBuffer: MAX_OUTPUT_SIZE
+            });
+            await this.tempDirectory.getFile(`${i}.raw.out`).write(rawData.stdout);
+          }
         } catch (e) {
           rawData = e;
           if (e.code === 3221225477) {
@@ -272,6 +304,7 @@ class Instance {
             // OUTPUT OVER LIMITS
             this.log(`run killed (output over limits, may be truncated)`);
             this.outputFile.log(`run killed (output over limits, may be truncated)`);
+            this.fail(undefined, e);
             if (this.inputFile.state.stopOnError === 'true') {
               throw 'safe';
             }
