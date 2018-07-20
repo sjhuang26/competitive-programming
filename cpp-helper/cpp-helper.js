@@ -9,8 +9,6 @@ const child_process = require('child_process');
 const fileInterface = require('./file-interface');
 
 const prm = util.promisify;
-const prmWriteFile = prm(fs.writeFile);
-const prmReadFile = prm(fs.readFile);
 const exec = prm(child_process.exec);
 
 let DEBUG_MODE = false;
@@ -89,11 +87,11 @@ class File extends FileSystem {
   }
 
   async read() {
-    return await prmReadFile(this.path, 'utf8');
+    return await prm(fs.readFile)(this.path, 'utf8');
   }
 
   async write(content) {
-    await prmWriteFile(this.path, content);
+    await prm(fs.writeFile)(this.path, content);
     return this;
   }
 
@@ -223,7 +221,7 @@ class Instance {
 
   async safeLog(message) {
     try {
-      this.outputFile.log(message);
+      await this.outputFile.log(message);
     } catch (e) {
       this.fail(e);
     }
@@ -389,7 +387,9 @@ class Instance {
       await this.outputFile.log('done!');
     } catch (e) {
       this.fail('build operation failed', e);
+      console.log('safe log ...');
       await this.safeLog('build operation failed');
+      console.log('safe log END ...');
     } finally {
       this.buildOpen = true;
     }
@@ -448,12 +448,18 @@ class Instance {
 let run = async (sourceFiles, options) => {
   DEBUG_MODE = options.debug;
   RESET_ALL = options.reset;
+  IO_WARN = options.ioWarn;
+
   if (DEBUG_MODE) {
     console.log('[INFO]', 'debug mode on');
   }
   if (RESET_ALL) {
     console.log('[INFO]', 'resetting all files');
   }
+  if (IO_WARN) {
+    console.log('[INFO]', 'IO warn on');
+  }
+
   let instances = [];
   for (sourceFile of sourceFiles) {
     instances.push(new Instance(sourceFile));
@@ -462,6 +468,9 @@ let run = async (sourceFiles, options) => {
     instance.init();
   }
 };
+
+// quick fix
+process.on('unhandledRejection', r => console.log(`[WARN] An unhandled promise rejection occurred; shouldn't be a problem.`));
 
 program
 .arguments('<sourceFiles...>')
