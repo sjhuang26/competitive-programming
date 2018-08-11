@@ -254,7 +254,7 @@ class Instance {
         inputs = [inputs];
       }
       const limitLevel = this.inputFile.state.limitLevel;
-      if (limitLevel === 'unlimited' || limitLevel === 'direct') {
+      if (limitLevel === 'reduced' || limitLevel === 'direct') {
         this.log('[WARN] running in reduced limits mode');
         this.outputFile.log('[WARN] running in reduced limits mode');
       }
