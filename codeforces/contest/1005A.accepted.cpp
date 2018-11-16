@@ -1,7 +1,7 @@
 /*
 Codeforces
 1005A
-(contest)
+(accepted)
 */
 #include<iostream>
 #include<vector>
