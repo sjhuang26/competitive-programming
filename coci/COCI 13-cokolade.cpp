@@ -1,5 +1,5 @@
 /*
-(could not upload the file to the grading server, but I assume that this is AC, unless there are performance issues, which can be trivially optimized)
+AC
 
 Key ideas:
 * We don't have to check every value of k - just the values where the candy distribution of at least one table changes. There are only 100 * sqrt(1e8) values to check in the worst case.
